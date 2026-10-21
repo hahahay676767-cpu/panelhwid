@@ -23,12 +23,13 @@ import path from 'path';
 
 dotenv.config();
 
-// Configuration
+// Configuration2
 const CONFIG = {
   discordToken: process.env.DISCORD_TOKEN,
   clientId: process.env.DISCORD_CLIENT_ID,
   apiUrl: process.env.JINHUB_API_URL || 'https://jinhub.my.id',
   adminToken: process.env.ADMIN_TOKEN,
+  kvEditorSecret: process.env.KV_EDITOR_SECRET || process.env.ADMIN_TOKEN,
   cooldownHours: parseInt(process.env.RESET_COOLDOWN_HOURS) || 48,
   logChannelId: process.env.RESET_LOG_CHANNEL_ID || null,
   panelChannelId: process.env.PANEL_CHANNEL_ID || null, // NEW: Channel for permanent panel
@@ -171,6 +172,51 @@ async function resetHWIDAPI(key) {
   } catch (error) {
     console.error('[API] Error resetting HWID:', error);
     return { success: false, error: error.message };
+  }
+}
+
+// Permanently remove a free key from its provider record and release the claim slot.
+async function removeFreeKeyAPI(key) {
+  try {
+    const headers = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${CONFIG.kvEditorSecret}`,
+      'User-Agent': 'JinHub-Discord-Bot/1.0'
+    };
+
+    const findResponse = await fetch(`${CONFIG.apiUrl}/api/kv-editor`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ action: 'find-key', keyString: key, token: CONFIG.adminToken })
+    });
+    const findData = await findResponse.json();
+    if (!findResponse.ok || !findData.success || !findData.found) {
+      return { success: false, error: findData.error || 'Key not found in provider records' };
+    }
+
+    if (!['lootlabs', 'boostellar'].includes(findData.provider)) {
+      return { success: false, error: 'Only LootLabs and Boostellar browser keys can be removed from this panel' };
+    }
+
+    const removeResponse = await fetch(`${CONFIG.apiUrl}/api/kv-editor`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        action: 'remove-free-key',
+        provider: findData.provider,
+        jhId: findData.jhId,
+        keyString: key,
+        token: CONFIG.adminToken
+      })
+    });
+    const removeData = await removeResponse.json();
+    if (!removeResponse.ok || !removeData.success) {
+      return { success: false, error: removeData.error || 'Server failed to remove the key' };
+    }
+    return { ...removeData, success: true };
+  } catch (error) {
+    console.error('[API] Error removing free key:', error);
+    return { success: false, error: error.message || 'Network error' };
   }
 }
 
@@ -322,7 +368,11 @@ function createPanelButtons() {
       new ButtonBuilder()
         .setCustomId('check_cooldown_list')
         .setLabel('Check Cooldown')
-        .setStyle(ButtonStyle.Success)
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId('remove_key_modal')
+        .setLabel('Remove Key')
+        .setStyle(ButtonStyle.Danger)
     );
 }
 
@@ -338,6 +388,11 @@ function buildPanelCard() {
       new TextDisplayBuilder().setContent(
         '**Manage Your Freemium/Premium key From Panel**\n\n' +
         '**Purchase** buy license key • **Reset HWID**\nReset hardware ID your device • **Check Cooldown** Time until your next reset'
+      )
+    )
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        '**Remove Key** permanently removes a LootLabs/Boostellar browser key and releases its claim slot.'
       )
     )
     .addSeparatorComponents(
@@ -476,7 +531,7 @@ client.on('interactionCreate', async interaction => {
             method: 'POST',
             headers: { 
               'Content-Type': 'application/json',
-              'Authorization': `Bearer ${CONFIG.adminToken}`
+              'Authorization': `Bearer ${CONFIG.kvEditorSecret}`
             },
             body: JSON.stringify({
               action: 'find-key',
@@ -517,8 +572,9 @@ client.on('interactionCreate', async interaction => {
           verifyResult = { valid: false, error: error.message };
         }
       } else {
-        // Premium key - use normal verify API
-        verifyResult = await verifyKeyAPI(key);
+        // Premium reset API is the authority for this admin action. The normal
+        // verify endpoint can return "HWID required" even for an existing key.
+        verifyResult = { valid: true, keyType: 'premium' };
       }
       
       if (!verifyResult || !verifyResult.valid) {
@@ -566,7 +622,7 @@ client.on('interactionCreate', async interaction => {
             method: 'POST',
             headers: { 
               'Content-Type': 'application/json',
-              'Authorization': `Bearer ${CONFIG.adminToken}`
+              'Authorization': `Bearer ${CONFIG.kvEditorSecret}`
             },
             body: JSON.stringify({
               action: 'set',
@@ -592,7 +648,7 @@ client.on('interactionCreate', async interaction => {
               method: 'POST',
               headers: { 
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${CONFIG.adminToken}`
+                'Authorization': `Bearer ${CONFIG.kvEditorSecret}`
               },
               body: JSON.stringify({
                 action: 'delete',
@@ -618,7 +674,7 @@ client.on('interactionCreate', async interaction => {
               method: 'POST',
               headers: { 
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${CONFIG.adminToken}`
+                'Authorization': `Bearer ${CONFIG.kvEditorSecret}`
               },
               body: JSON.stringify({
                 action: 'set',
@@ -692,7 +748,7 @@ client.on('interactionCreate', async interaction => {
       
       const successPayload = buildResetSuccessCard({
         key,
-        tierName: verifyResult.tierName || verifyResult.tier,
+        tierName: resetResult.tierName || verifyResult.tierName || verifyResult.tier,
         nextResetDate
       });
       
@@ -707,7 +763,7 @@ client.on('interactionCreate', async interaction => {
               '## 🔄 HWID Reset Log',
               `**User**\n${user.tag} (${user.id})`,
               `**Key**\n\`${key}\``,
-              `**Tier**\n${verifyResult.tierName || verifyResult.tier}`,
+              `**Tier**\n${resetResult.tierName || verifyResult.tierName || verifyResult.tier}`,
             ]));
           }
         } catch (error) {
@@ -717,6 +773,51 @@ client.on('interactionCreate', async interaction => {
 
       console.log(`[Reset] Success! User ${user.tag} reset key ${key}`);
       return;
+    }
+
+    if (interaction.customId === 'remove_key_modal_form') {
+      const adminIds = (process.env.ADMIN_USER_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
+      const isServerAdmin = interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) === true;
+      if (!isServerAdmin && !adminIds.includes(user.id)) {
+        return await interaction.reply({
+          content: 'Only configured JinHub admins can permanently remove browser keys.',
+          ephemeral: true
+        });
+      }
+
+      await interaction.deferReply({ ephemeral: true });
+      const rawKey = interaction.fields.getTextInputValue('remove_key_input').trim();
+      const key = rawKey.replace(/^jinhub-/i, 'JinHub-');
+      const freeFormat = /^JinHub-[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6}$/;
+
+      if (!freeFormat.test(key)) {
+        return await replyWithAutoDelete(interaction, buildCard([
+          '## Invalid Free Key',
+          'Enter a LootLabs or Boostellar browser key in this format:',
+          '`JinHub-XXXXXX-XXXXXX-XXXXXX`',
+          '-# JinHub System'
+        ]));
+      }
+
+      const result = await removeFreeKeyAPI(key);
+      if (!result.success) {
+        return await replyWithAutoDelete(interaction, buildCard([
+          '## Remove Key Failed',
+          'The browser key was not removed.',
+          `**Error**\n${result.error || 'Unknown server error'}`,
+          '-# JinHub System'
+        ]));
+      }
+
+      console.log(`[Remove Key] User ${user.tag} removed ${key} from ${result.provider}; remaining=${result.remainingKeys}`);
+      return await replyWithAutoDelete(interaction, buildCard([
+        '## Key Removed',
+        'The key was removed from the provider record and its keymap. The browser claim slot is available again.',
+        `**Provider**\n${result.provider}`,
+        `**Remaining keys**\n${result.remainingKeys}`,
+        'The browser key list refreshes from the server when the key page is opened or refreshed.',
+        '-# JinHub System'
+      ]));
     }
     
     return;
@@ -758,6 +859,24 @@ client.on('interactionCreate', async interaction => {
       const firstRow = new ActionRowBuilder().addComponents(keyInput);
       modal.addComponents(firstRow);
 
+      return await interaction.showModal(modal);
+    }
+
+    if (interaction.customId === 'remove_key_modal') {
+      const modal = new ModalBuilder()
+        .setCustomId('remove_key_modal_form')
+        .setTitle('Remove Browser Key');
+
+      const keyInput = new TextInputBuilder()
+        .setCustomId('remove_key_input')
+        .setLabel('LootLabs / Boostellar free key:')
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder('JinHub-XXXXXX-XXXXXX-XXXXXX')
+        .setRequired(true)
+        .setMinLength(27)
+        .setMaxLength(27);
+
+      modal.addComponents(new ActionRowBuilder().addComponents(keyInput));
       return await interaction.showModal(modal);
     }
     
