@@ -23,7 +23,7 @@ import path from 'path';
 
 dotenv.config();
 
-// Configuration
+// Configuration3
 const CONFIG = {
   discordToken: process.env.DISCORD_TOKEN,
   clientId: process.env.DISCORD_CLIENT_ID,
@@ -490,7 +490,7 @@ client.on('interactionCreate', async interaction => {
       
       // Validate key format (support both FREE and PREMIUM formats)
       const premiumFormat = /^JH[FSLPM]-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
-      const freeFormat = /^JinHub-[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6}$/;
+      const freeFormat = /^JinHub-(?:[A-F0-9]{32}|[A-F0-9]{6}(?:-[A-F0-9]{6}){2})$/;
       
       if (!premiumFormat.test(key) && !freeFormat.test(key)) {
         return await replyWithAutoDelete(interaction, buildCard([
@@ -788,7 +788,7 @@ client.on('interactionCreate', async interaction => {
       await interaction.deferReply({ ephemeral: true });
       const rawKey = interaction.fields.getTextInputValue('remove_key_input').trim();
       const key = rawKey.replace(/^jinhub-/i, 'JinHub-');
-      const freeFormat = /^JinHub-[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6}$/;
+      const freeFormat = /^JinHub-(?:[A-F0-9]{32}|[A-F0-9]{6}(?:-[A-F0-9]{6}){2})$/;
 
       if (!freeFormat.test(key)) {
         return await replyWithAutoDelete(interaction, buildCard([
@@ -854,7 +854,7 @@ client.on('interactionCreate', async interaction => {
         .setPlaceholder('XXXX-XXXX-XXXX-XXXX')
         .setRequired(true)
         .setMinLength(16)
-        .setMaxLength(30);
+        .setMaxLength(39);
 
       const firstRow = new ActionRowBuilder().addComponents(keyInput);
       modal.addComponents(firstRow);
@@ -874,7 +874,7 @@ client.on('interactionCreate', async interaction => {
         .setPlaceholder('JinHub-XXXXXX-XXXXXX-XXXXXX')
         .setRequired(true)
         .setMinLength(27)
-        .setMaxLength(27);
+        .setMaxLength(39);
 
       modal.addComponents(new ActionRowBuilder().addComponents(keyInput));
       return await interaction.showModal(modal);
