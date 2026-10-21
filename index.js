@@ -23,7 +23,7 @@ import path from 'path';
 
 dotenv.config();
 
-// Configuration2
+// Configuration
 const CONFIG = {
   discordToken: process.env.DISCORD_TOKEN,
   clientId: process.env.DISCORD_CLIENT_ID,
@@ -372,7 +372,7 @@ function createPanelButtons() {
       new ButtonBuilder()
         .setCustomId('remove_key_modal')
         .setLabel('Remove Key')
-        .setStyle(ButtonStyle.Danger)
+        .setStyle(ButtonStyle.Success)
     );
 }
 
@@ -483,13 +483,13 @@ client.on('interactionCreate', async interaction => {
       const keyInput = interaction.fields.getTextInputValue('key_input').trim();
       
       // Preserve case for free keys (JinHub-xxx-xxx-xxx)
-      // Only uppercase for premium keys (JH[FSLP]-XXX-XXX-XXX)
+      // Only uppercase for premium keys (JHF/JHS/JHP/JHM/JHL).
       const key = keyInput.startsWith('JinHub-') || keyInput.startsWith('jinhub-') 
         ? keyInput.replace(/^jinhub-/i, 'JinHub-') // Normalize to JinHub- prefix
         : keyInput.toUpperCase(); // Premium keys to uppercase
       
       // Validate key format (support both FREE and PREMIUM formats)
-      const premiumFormat = /^JH[FSLP]-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
+      const premiumFormat = /^JH[FSLPM]-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
       const freeFormat = /^JinHub-[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6}$/;
       
       if (!premiumFormat.test(key) && !freeFormat.test(key)) {
@@ -519,7 +519,7 @@ client.on('interactionCreate', async interaction => {
       
       // Determine if it's a free or premium key based on format
       const isFreeKey = key.startsWith('JinHub-'); // Case-sensitive for free keys
-      const isPremiumKey = /^JH[FSLP]-/.test(key);
+      const isPremiumKey = /^JH[FSLPM]-/.test(key);
       
       let verifyResult;
       let keyData;
