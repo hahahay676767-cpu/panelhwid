@@ -1,7 +1,6 @@
 import { 
   Client, 
   GatewayIntentBits, 
-  EmbedBuilder, 
   SlashCommandBuilder, 
   REST, 
   Routes,
@@ -11,7 +10,12 @@ import {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
-  PermissionFlagsBits
+  PermissionFlagsBits,
+  ContainerBuilder,
+  TextDisplayBuilder,
+  SeparatorBuilder,
+  SeparatorSpacingSize,
+  MessageFlags
 } from 'discord.js';
 import dotenv from 'dotenv';
 import fs from 'fs';
@@ -171,6 +175,83 @@ async function resetHWIDAPI(key) {
   }
 }
 
+// Permanently remove a free key from its provider record and release the claim slot.
+async function removeFreeKeyAPI(key) {
+  try {
+    const headers = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${CONFIG.kvEditorSecret}`,
+      'User-Agent': 'JinHub-Discord-Bot/1.0'
+    };
+
+    const findResponse = await fetch(`${CONFIG.apiUrl}/api/kv-editor`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ action: 'find-key', keyString: key, token: CONFIG.adminToken })
+    });
+    const findData = await findResponse.json();
+    if (!findResponse.ok || !findData.success || !findData.found) {
+      return { success: false, error: findData.error || 'Key not found in provider records' };
+    }
+
+    if (!['lootlabs', 'boostellar'].includes(findData.provider)) {
+      return { success: false, error: 'Only LootLabs and Boostellar browser keys can be removed from this panel' };
+    }
+
+    const removeResponse = await fetch(`${CONFIG.apiUrl}/api/kv-editor`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        action: 'remove-free-key',
+        provider: findData.provider,
+        jhId: findData.jhId,
+        keyString: key,
+        token: CONFIG.adminToken
+      })
+    });
+    const removeData = await removeResponse.json();
+    if (!removeResponse.ok || !removeData.success) {
+      return { success: false, error: removeData.error || 'Server failed to remove the key' };
+    }
+    return { ...removeData, success: true };
+  } catch (error) {
+    console.error('[API] Error removing free key:', error);
+    return { success: false, error: error.message || 'Network error' };
+  }
+}
+
+// Verify key exists via API (for HWID reset - allows expired keys)
+async function verifyKeyAPI(key) {
+  try {
+    const response = await fetch(`${CONFIG.apiUrl}/api/premium/verify?key=${encodeURIComponent(key)}`, {
+      headers: {
+        'User-Agent': 'JinHub-Discord-Bot/1.0'
+      }
+    });
+    const data = await response.json();
+    
+    // For HWID reset, we allow expired keys
+    // Only reject if key doesn't exist or is revoked
+    if (!data.success && data.error === 'Key not found') {
+      return { valid: false, error: 'Key not found' };
+    }
+    
+    if (data.error === 'Key revoked' || data.status === 'revoked') {
+      return { valid: false, error: 'Key revoked' };
+    }
+    
+    // Accept both valid and expired keys
+    return {
+      valid: true,
+      ...data,
+      isExpired: data.error === 'Key expired' || data.status === 'expired'
+    };
+  } catch (error) {
+    console.error('[API] Error verifying key:', error);
+    return { valid: false, error: error.message };
+  }
+}
+
 // Create Discord client
 const client = new Client({
   intents: [
@@ -244,24 +325,23 @@ async function setupPermanentPanel() {
       return;
     }
 
-    const embed = createPanelEmbed();
-    const row = createPanelButtons();
+    const payload = buildPanelCard();
 
     if (CONFIG.panelMessageId) {
       // Update existing message
       try {
         const message = await channel.messages.fetch(CONFIG.panelMessageId);
-        await message.edit({ embeds: [embed], components: [row] });
+        await message.edit(payload);
         console.log('[Panel] Updated existing panel message');
       } catch (error) {
         console.error('[Panel] Could not update message, creating new one:', error);
-        const newMessage = await channel.send({ embeds: [embed], components: [row] });
+        const newMessage = await channel.send(payload);
         console.log('[Panel] Created new panel message:', newMessage.id);
         console.log('[Panel] Add this to .env: PANEL_MESSAGE_ID=' + newMessage.id);
       }
     } else {
       // Create new message
-      const newMessage = await channel.send({ embeds: [embed], components: [row] });
+      const newMessage = await channel.send(payload);
       console.log('[Panel] Created new panel message:', newMessage.id);
       console.log('[Panel] Add this to .env: PANEL_MESSAGE_ID=' + newMessage.id);
     }
@@ -270,41 +350,123 @@ async function setupPermanentPanel() {
   }
 }
 
-// Create panel embed
-function createPanelEmbed() {
-  return new EmbedBuilder()
-    .setColor(0x7367f0)
-    .setTitle('JinHub - Panel')
-    .setDescription(
-      '**HWID Reset System**\n\n' +
-      'If you\'re a buyer or want to reset your HWID, click on the button below.\n\n' +
-      'Each key can be reset once every **2 days**.'
-    )
-    .setFooter({ text: 'JinHub System â€¢ Cooldown: 2 days' })
-    .setTimestamp();
-}
+// Purchase access link (shown via the "Open Pricing" link button)
+const PURCHASE_URL = 'https://discordapp.com/channels/1409740790141423738/1443912803881586731';
 
-// Create panel buttons
+// Build the panel buttons (all green / Success style, no emoji)
 function createPanelButtons() {
   return new ActionRowBuilder()
     .addComponents(
       new ButtonBuilder()
-        .setCustomId('redeem_key')
-        .setLabel('ðŸ”‘ Redeem Key')
+        .setCustomId('purchase_key')
+        .setLabel('Purchase')
         .setStyle(ButtonStyle.Success),
       new ButtonBuilder()
         .setCustomId('reset_hwid_modal')
-        .setLabel('âš™ï¸ Reset HWID')
-        .setStyle(ButtonStyle.Danger),
+        .setLabel('Reset HWID')
+        .setStyle(ButtonStyle.Success),
       new ButtonBuilder()
         .setCustomId('check_cooldown_list')
-        .setLabel('â° Check Cooldown')
-        .setStyle(ButtonStyle.Primary),
+        .setLabel('Check Cooldown')
+        .setStyle(ButtonStyle.Success),
       new ButtonBuilder()
-        .setCustomId('remove_free_key_modal')
-        .setLabel('Remove Free Key')
-        .setStyle(ButtonStyle.Secondary)
+        .setCustomId('remove_key_modal')
+        .setLabel('Remove Key')
+        .setStyle(ButtonStyle.Danger)
     );
+}
+
+// Build the panel card using Components V2 (no embed, no left accent bar,
+// buttons live inside the same box as the title/description)
+function buildPanelCard() {
+  const container = new ContainerBuilder()
+    .addTextDisplayComponents(new TextDisplayBuilder().setContent('## JinHub - Panel'))
+    .addSeparatorComponents(
+      new SeparatorBuilder().setDivider(true).setSpacing(SeparatorSpacingSize.Small)
+    )
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        '**Manage Your Freemium/Premium key From Panel**\n\n' +
+        '**Purchase** buy license key • **Reset HWID**\nReset hardware ID your device • **Check Cooldown** Time until your next reset'
+      )
+    )
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        '**Remove Key** permanently removes a LootLabs/Boostellar browser key and releases its claim slot.'
+      )
+    )
+    .addSeparatorComponents(
+      new SeparatorBuilder().setDivider(true).setSpacing(SeparatorSpacingSize.Small)
+    )
+    .addActionRowComponents(createPanelButtons());
+
+  return {
+    flags: MessageFlags.IsComponentsV2,
+    components: [container],
+  };
+}
+
+// Build the "HWID Reset Successful" card using Components V2 (no embed, no left accent bar)
+function buildResetSuccessCard({ key, tierName, nextResetDate }) {
+  const container = new ContainerBuilder().addTextDisplayComponents(
+    new TextDisplayBuilder().setContent('## <:check1:1551389827159556177> HWID Reset Successful!'),
+    new TextDisplayBuilder().setContent('Your hardware ID has been reset successfully.'),
+    new TextDisplayBuilder().setContent(`**Key**\n\`${key}\``),
+    new TextDisplayBuilder().setContent(`**Tier**\n${tierName}`),
+    new TextDisplayBuilder().setContent(
+      `<a:timesand:1551390654804795392> **Next Reset Available**\n<t:${Math.floor(nextResetDate.getTime() / 1000)}:R>`
+    ),
+    new TextDisplayBuilder().setContent(
+      `-# JinHub System • You can now bind this key to a new device`
+    )
+  );
+
+  return {
+    flags: MessageFlags.IsComponentsV2,
+    components: [container],
+  };
+}
+
+// Build the "Your Cooldown Status" card using Components V2 (no embed, no left accent bar)
+function buildCooldownStatusCard(userCooldowns) {
+  const lines = [];
+
+  lines.push('## <a:timesand:1551390654804795392> Your Cooldown Status');
+
+  if (userCooldowns.length === 0) {
+    lines.push('You haven\'t reset any keys yet.\n\nUse the "Reset HWID" button to reset a key.');
+  } else {
+    lines.push(`Total keys reset: **${userCooldowns.length}**`);
+
+    for (const cd of userCooldowns) {
+      const status = cd.canReset ? 'Ready' : `<t:${Math.floor(cd.nextReset.getTime() / 1000)}:R>`;
+      lines.push(`**${cd.key}**\nLast: <t:${Math.floor(cd.lastReset.getTime() / 1000)}:R>\n${status}`);
+    }
+  }
+
+  lines.push('-# JinHub System • Cooldown: 2 days');
+
+  const container = new ContainerBuilder().addTextDisplayComponents(
+    ...lines.map((c) => new TextDisplayBuilder().setContent(c))
+  );
+
+  return {
+    flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral,
+    components: [container],
+  };
+}
+
+// Generic helper: build a plain Components V2 card from an array of text blocks.
+// Each entry becomes its own TextDisplay component (rendered stacked, no embed, no accent bar).
+function buildCard(lines) {
+  const container = new ContainerBuilder().addTextDisplayComponents(
+    ...lines.map((c) => new TextDisplayBuilder().setContent(c))
+  );
+
+  return {
+    flags: MessageFlags.IsComponentsV2,
+    components: [container],
+  };
 }
 
 // Handle slash commands and interactions
@@ -315,97 +477,41 @@ client.on('interactionCreate', async interaction => {
 
   // Handle modal submissions
   if (interaction.isModalSubmit()) {
-    if (interaction.customId === 'remove_free_key_modal_form') {
-      await interaction.deferReply({ ephemeral: true });
-      const keyInput = interaction.fields.getTextInputValue('remove_key_input').trim();
-      const key = /^jinhub-/i.test(keyInput) ? 'JinHub-' + keyInput.slice(7).toUpperCase() : keyInput.toUpperCase();
-      const freeFormat = /^JinHub-(?:[A-F0-9]{32}|[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6})$/;
-      if (!freeFormat.test(key)) return await interaction.editReply({ content: 'Format key free tidak valid.' });
-      try {
-        const response = await fetch(CONFIG.apiUrl + '/api/kv-editor', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + CONFIG.kvEditorSecret },
-          body: JSON.stringify({ action: 'find-key', keyString: key, token: CONFIG.adminToken })
-        });
-        const found = await response.json();
-        if (!found.success || !found.found || !['lootlabs', 'boostellar'].includes(found.provider)) {
-          return await interaction.editReply({ content: found.error || 'Key LootLabs/Boostellar tidak ditemukan.' });
-        }
-        const providerName = found.provider === 'boostellar' ? 'Boostellar' : 'LootLabs';
-        const embed = new EmbedBuilder()
-          .setColor(0xef4444)
-          .setTitle('Confirm permanent key removal')
-          .setDescription('Key ' + key + ' (' + providerName + ') akan dihapus dari record browser dan server. Key menjadi tidak berlaku dan slot klaim provider ini terbuka kembali. Refresh halaman key system setelah penghapusan.')
-          .setFooter({ text: 'This action cannot be undone.' });
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('remove_free_confirm:' + user.id + ':' + key).setLabel('Delete Permanently').setStyle(ButtonStyle.Danger),
-          new ButtonBuilder().setCustomId('remove_free_cancel:' + user.id).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
-        );
-        return await interaction.editReply({ embeds: [embed], components: [row] });
-      } catch (error) {
-        console.error('[Remove Key] Lookup failed:', error);
-        return await interaction.editReply({ content: 'Gagal mencari key. Coba lagi atau hubungi admin.' });
-      }
-    }
     if (interaction.customId === 'reset_hwid_modal_form') {
       await interaction.deferReply({ ephemeral: true });
 
       const keyInput = interaction.fields.getTextInputValue('key_input').trim();
       
-      // Normalize both key families; free-key lookups in KV are case-sensitive.
-      const key = /^jinhub-/i.test(keyInput)
-        ? 'JinHub-' + keyInput.slice(7).toUpperCase()
-        : keyInput.toUpperCase();
-
-      // Accept current UUID free keys and legacy grouped free keys. Premium
-      // prefixes include JHM (Pro), as well as the older supported tiers.
-      const premiumFormat = /^JH[FSLMP]-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
-      const freeFormat = /^JinHub-(?:[A-F0-9]{32}|[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6})$/;
+      // Preserve case for free keys (JinHub-xxx-xxx-xxx)
+      // Only uppercase for premium keys (JH[FSLP]-XXX-XXX-XXX)
+      const key = keyInput.startsWith('JinHub-') || keyInput.startsWith('jinhub-') 
+        ? keyInput.replace(/^jinhub-/i, 'JinHub-') // Normalize to JinHub- prefix
+        : keyInput.toUpperCase(); // Premium keys to uppercase
+      
+      // Validate key format (support both FREE and PREMIUM formats)
+      const premiumFormat = /^JH[FSLP]-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
+      const freeFormat = /^JinHub-[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6}$/;
       
       if (!premiumFormat.test(key) && !freeFormat.test(key)) {
-        const errorEmbed = new EmbedBuilder()
-          .setColor(0xef4444)
-          .setTitle('âŒ Invalid Key Format')
-          .setDescription('Please provide a valid JinHub key format.')
-          .addFields({
-            name: 'Valid Premium Format',
-            value: '`XXX-XXXX-XXXX-XXXX`\n`XXX-XXXX-XXXX-XXXX`\n`XXX-XXXX-XXXX-XXXX`\n`XXX-XXXX-XXXX-XXXX`',
-            inline: true
-          },
-          {
-            name: 'Valid Free Format',
-            value: '`JinHub-XXXXXX-XXXXXX-XXXXXX`',
-            inline: true
-          })
-          .setFooter({ text: 'JinHub System' })
-          .setTimestamp();
-        
-        return await replyWithAutoDelete(interaction, { embeds: [errorEmbed] });
+        return await replyWithAutoDelete(interaction, buildCard([
+          '## ❌ Invalid Key Format',
+          'Please provide a valid JinHub key format.',
+          '**Valid Premium Format**\n`XXX-XXXX-XXXX-XXXX`',
+          '**Valid Free Format**\n`JinHub-XXXXXX-XXXXXX-XXXXXX`',
+          '-# JinHub System',
+        ]));
       }
 
       // Check cooldown
       const cooldownCheck = isOnCooldown(user.id, key);
       if (cooldownCheck.onCooldown) {
-        const cooldownEmbed = new EmbedBuilder()
-          .setColor(0xf59e0b)
-          .setTitle('â° Reset on Cooldown')
-          .setDescription('You need to wait before resetting this key again.')
-          .addFields(
-            {
-              name: 'â³ Time Remaining',
-              value: `${cooldownCheck.hoursRemaining}h ${cooldownCheck.minutesRemaining}m`,
-              inline: true
-            },
-            {
-              name: 'ðŸ“… Next Reset Available',
-              value: `<t:${Math.floor(cooldownCheck.nextResetDate.getTime() / 1000)}:R>`,
-              inline: true
-            }
-          )
-          .setFooter({ text: 'JinHub System â€¢ Cooldown: 2 days' })
-          .setTimestamp();
-        
-        return await replyWithAutoDelete(interaction, { embeds: [cooldownEmbed] });
+        return await replyWithAutoDelete(interaction, buildCard([
+          '## ⏰ Reset on Cooldown',
+          'You need to wait before resetting this key again.',
+          `**Time Remaining**\n${cooldownCheck.hoursRemaining}h ${cooldownCheck.minutesRemaining}m`,
+          `**Next Reset Available**\n<t:${Math.floor(cooldownCheck.nextResetDate.getTime() / 1000)}:R>`,
+          '-# JinHub System • Cooldown: 2 days',
+        ]));
       }
 
       // Verify key
@@ -413,7 +519,7 @@ client.on('interactionCreate', async interaction => {
       
       // Determine if it's a free or premium key based on format
       const isFreeKey = key.startsWith('JinHub-'); // Case-sensitive for free keys
-      const isPremiumKey = /^JH[FSLMP]-/.test(key);
+      const isPremiumKey = /^JH[FSLP]-/.test(key);
       
       let verifyResult;
       let keyData;
@@ -425,7 +531,7 @@ client.on('interactionCreate', async interaction => {
             method: 'POST',
             headers: { 
               'Content-Type': 'application/json',
-              'Authorization': 'Bearer ' + CONFIG.kvEditorSecret
+              'Authorization': `Bearer ${CONFIG.kvEditorSecret}`
             },
             body: JSON.stringify({
               action: 'find-key',
@@ -466,24 +572,18 @@ client.on('interactionCreate', async interaction => {
           verifyResult = { valid: false, error: error.message };
         }
       } else {
-        // Premium reset endpoint validates existence and revocation itself.
-        // Skip verify here: it requires an HWID, which a reset request lacks.
+        // Premium reset API is the authority for this admin action. The normal
+        // verify endpoint can return "HWID required" even for an existing key.
         verifyResult = { valid: true, keyType: 'premium' };
       }
       
       if (!verifyResult || !verifyResult.valid) {
-        const errorEmbed = new EmbedBuilder()
-          .setColor(0xef4444)
-          .setTitle('âŒ Invalid Key')
-          .setDescription('This key does not exist or is invalid.')
-          .addFields({
-            name: 'Error',
-            value: verifyResult?.error || 'Key not found in database'
-          })
-          .setFooter({ text: 'JinHub System' })
-          .setTimestamp();
-        
-        return await replyWithAutoDelete(interaction, { embeds: [errorEmbed] });
+        return await replyWithAutoDelete(interaction, buildCard([
+          '## ❌ Invalid Key',
+          'This key does not exist or is invalid.',
+          `**Error**\n${verifyResult?.error || 'Key not found in database'}`,
+          '-# JinHub System',
+        ]));
       }
 
       // Reset HWID
@@ -522,7 +622,7 @@ client.on('interactionCreate', async interaction => {
             method: 'POST',
             headers: { 
               'Content-Type': 'application/json',
-              'Authorization': 'Bearer ' + CONFIG.kvEditorSecret
+              'Authorization': `Bearer ${CONFIG.kvEditorSecret}`
             },
             body: JSON.stringify({
               action: 'set',
@@ -537,8 +637,62 @@ client.on('interactionCreate', async interaction => {
           console.log(`[Reset] FREE key update result:`, updateData);
           
           if (updateData.success) {
-            // keymap only maps a key to its owner; HWID lives in keyrec.
-            // Leave the index untouched so reset cannot split the two records.
+            // IMPORTANT: Invalidate keymap cache by deleting and recreating it
+            // This forces Cloudflare to fetch fresh keyrec data
+            console.log(`[Reset] Invalidating keymap cache for ${key}...`);
+            
+            const keymapKey = `keymap:${keyData.provider}:${key}`;
+            
+            // Delete keymap
+            const deleteResponse = await fetch(`${CONFIG.apiUrl}/api/kv-editor`, {
+              method: 'POST',
+              headers: { 
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${CONFIG.kvEditorSecret}`
+              },
+              body: JSON.stringify({
+                action: 'delete',
+                key: keymapKey,
+                token: CONFIG.adminToken
+              })
+            });
+            
+            const deleteResult = await deleteResponse.json();
+            console.log(`[Reset] Deleted keymap: ${keymapKey}`, deleteResult);
+            
+            if (!deleteResult.success) {
+              console.error('[Reset] ❌ Failed to delete keymap:', deleteResult.error);
+              throw new Error(`Failed to delete keymap: ${deleteResult.error}`);
+            }
+            
+            // Recreate keymap with TTL based on key expiration
+            const now = Date.now();
+            const expiresAt = keyData.record.keys[keyIndex].expiresAt;
+            const ttlSeconds = expiresAt > now ? Math.ceil((expiresAt - now) / 1000 * 1.5) : 3600;
+            
+            const recreateResponse = await fetch(`${CONFIG.apiUrl}/api/kv-editor`, {
+              method: 'POST',
+              headers: { 
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${CONFIG.kvEditorSecret}`
+              },
+              body: JSON.stringify({
+                action: 'set',
+                key: keymapKey,
+                value: keyData.jhId,
+                ttl: ttlSeconds, // Add TTL support
+                token: CONFIG.adminToken
+              })
+            });
+            
+            const recreateResult = await recreateResponse.json();
+            console.log(`[Reset] Recreated keymap with TTL ${ttlSeconds}s`, recreateResult);
+            
+            if (!recreateResult.success) {
+              console.error('[Reset] ❌ Failed to recreate keymap:', recreateResult.error);
+              throw new Error(`Failed to recreate keymap: ${recreateResult.error}`);
+            }
+            
             resetResult = {
               success: true,
               message: 'HWID reset successfully',
@@ -549,14 +703,14 @@ client.on('interactionCreate', async interaction => {
               provider: keyData.provider
             };
             
-            console.log(`[Reset] âœ… FREE key HWID reset successful: ${key}`);
+            console.log(`[Reset] ✅ FREE key HWID reset successful: ${key}`);
           } else {
             resetResult = {
               success: false,
               error: updateData.error || 'Failed to update KV'
             };
             
-            console.error(`[Reset] âŒ FREE key HWID reset failed:`, updateData.error);
+            console.error(`[Reset] ❌ FREE key HWID reset failed:`, updateData.error);
           }
         } catch (error) {
           console.error('[Reset] Error resetting free key HWID:', error);
@@ -572,25 +726,19 @@ client.on('interactionCreate', async interaction => {
         console.log(`[Reset] PREMIUM key reset result:`, resetResult);
         
         if (resetResult.success) {
-          console.log(`[Reset] âœ… PREMIUM key HWID reset successful: ${key}`);
+          console.log(`[Reset] ✅ PREMIUM key HWID reset successful: ${key}`);
         } else {
-          console.error(`[Reset] âŒ PREMIUM key HWID reset failed:`, resetResult.error);
+          console.error(`[Reset] ❌ PREMIUM key HWID reset failed:`, resetResult.error);
         }
       }
       
       if (!resetResult.success) {
-        const errorEmbed = new EmbedBuilder()
-          .setColor(0xef4444)
-          .setTitle('âŒ Reset Failed')
-          .setDescription('Failed to reset HWID. Please try again or contact support.')
-          .addFields({
-            name: 'Error',
-            value: resetResult.error || 'Unknown error'
-          })
-          .setFooter({ text: 'JinHub System' })
-          .setTimestamp();
-        
-        return await replyWithAutoDelete(interaction, { embeds: [errorEmbed] });
+        return await replyWithAutoDelete(interaction, buildCard([
+          '## ❌ Reset Failed',
+          'Failed to reset HWID. Please try again or contact support.',
+          `**Error**\n${resetResult.error || 'Unknown error'}`,
+          '-# JinHub System',
+        ]));
       }
 
       // Success! Set cooldown
@@ -598,48 +746,25 @@ client.on('interactionCreate', async interaction => {
       
       const nextResetDate = new Date(Date.now() + (CONFIG.cooldownHours * 60 * 60 * 1000));
       
-      const successEmbed = new EmbedBuilder()
-        .setColor(0x22c55e)
-        .setTitle('âœ… HWID Reset Successful!')
-        .setDescription('Your hardware ID has been reset successfully.')
-        .addFields(
-          {
-            name: 'ðŸ”‘ Key',
-            value: `\`${key}\``,
-            inline: true
-          },
-          {
-            name: 'ðŸ“Š Tier',
-            value: `${verifyResult.tierName || verifyResult.tier}`,
-            inline: true
-          },
-          {
-            name: 'â° Next Reset Available',
-            value: `<t:${Math.floor(nextResetDate.getTime() / 1000)}:R>`,
-            inline: false
-          }
-        )
-        .setFooter({ text: 'JinHub System â€¢ You can now bind this key to a new device' })
-        .setTimestamp();
+      const successPayload = buildResetSuccessCard({
+        key,
+        tierName: resetResult.tierName || verifyResult.tierName || verifyResult.tier,
+        nextResetDate
+      });
       
-      await replyWithAutoDelete(interaction, { embeds: [successEmbed] });
+      await replyWithAutoDelete(interaction, successPayload);
 
       // Log to channel if configured
       if (CONFIG.logChannelId) {
         try {
           const logChannel = await client.channels.fetch(CONFIG.logChannelId);
           if (logChannel) {
-            const logEmbed = new EmbedBuilder()
-              .setColor(0x3b82f6)
-              .setTitle('ðŸ”„ HWID Reset Log')
-              .addFields(
-                { name: 'User', value: `${user.tag} (${user.id})`, inline: true },
-                { name: 'Key', value: `\`${key}\``, inline: true },
-                { name: 'Tier', value: verifyResult.tierName || verifyResult.tier, inline: true }
-              )
-              .setTimestamp();
-            
-            await logChannel.send({ embeds: [logEmbed] });
+            await logChannel.send(buildCard([
+              '## 🔄 HWID Reset Log',
+              `**User**\n${user.tag} (${user.id})`,
+              `**Key**\n\`${key}\``,
+              `**Tier**\n${resetResult.tierName || verifyResult.tierName || verifyResult.tier}`,
+            ]));
           }
         } catch (error) {
           console.error('[Log] Error sending to log channel:', error);
@@ -649,91 +774,73 @@ client.on('interactionCreate', async interaction => {
       console.log(`[Reset] Success! User ${user.tag} reset key ${key}`);
       return;
     }
+
+    if (interaction.customId === 'remove_key_modal_form') {
+      const adminIds = (process.env.ADMIN_USER_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
+      const isServerAdmin = interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) === true;
+      if (!isServerAdmin && !adminIds.includes(user.id)) {
+        return await interaction.reply({
+          content: 'Only configured JinHub admins can permanently remove browser keys.',
+          ephemeral: true
+        });
+      }
+
+      await interaction.deferReply({ ephemeral: true });
+      const rawKey = interaction.fields.getTextInputValue('remove_key_input').trim();
+      const key = rawKey.replace(/^jinhub-/i, 'JinHub-');
+      const freeFormat = /^JinHub-[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6}$/;
+
+      if (!freeFormat.test(key)) {
+        return await replyWithAutoDelete(interaction, buildCard([
+          '## Invalid Free Key',
+          'Enter a LootLabs or Boostellar browser key in this format:',
+          '`JinHub-XXXXXX-XXXXXX-XXXXXX`',
+          '-# JinHub System'
+        ]));
+      }
+
+      const result = await removeFreeKeyAPI(key);
+      if (!result.success) {
+        return await replyWithAutoDelete(interaction, buildCard([
+          '## Remove Key Failed',
+          'The browser key was not removed.',
+          `**Error**\n${result.error || 'Unknown server error'}`,
+          '-# JinHub System'
+        ]));
+      }
+
+      console.log(`[Remove Key] User ${user.tag} removed ${key} from ${result.provider}; remaining=${result.remainingKeys}`);
+      return await replyWithAutoDelete(interaction, buildCard([
+        '## Key Removed',
+        'The key was removed from the provider record and its keymap. The browser claim slot is available again.',
+        `**Provider**\n${result.provider}`,
+        `**Remaining keys**\n${result.remainingKeys}`,
+        'The browser key list refreshes from the server when the key page is opened or refreshed.',
+        '-# JinHub System'
+      ]));
+    }
     
     return;
   }
 
   // Handle button interactions
   if (interaction.isButton()) {
-    // Redeem Key button
-    if (interaction.customId === 'redeem_key') {
-      const embed = new EmbedBuilder()
-        .setColor(0x22c55e)
-        .setTitle('ðŸ”‘ Redeem a Key')
-        .setDescription(
-          '**How to get JinHub keys:**\n\n' +
-          '**Free Keys** (Checkpoint-based):\n' +
-          'â€¢ Visit our website\n' +
-          'â€¢ Complete checkpoints (Lootlabs, Bosstellar, Work.ink.)\n' +
-          'â€¢ Get instant free key\n' +
-          'â€¢ Format: `JinHub-XXXXXX-XXXXXX-XXXXXX`\n\n' +
-          '**Premium Keys**:\n' +
-          'â€¢ Purchase from our panel\n' +
-          'â€¢ Longer duration & HWID protection\n' +
-          'â€¢ Format: `XXX-XXXX-XXXX-XXXX`\n\n' +
-          '**Need to reset HWID?**\n' +
-          'Premium & Freemium keys support HWID reset.\n' +
-          'Use the "âš™ï¸ Reset HWID" button for Premium keys.'
-        )
-        .setFooter({ text: 'JinHub System â€¢ Free & Premium keys available' })
-        .setTimestamp();
-      
-      return await interaction.reply({ embeds: [embed], ephemeral: true });
+    // Purchase button -> show a link button to the pricing page
+    if (interaction.customId === 'purchase_key') {
+      const linkRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setLabel('Open Ticket')
+          .setStyle(ButtonStyle.Link)
+          .setURL(PURCHASE_URL)
+      );
+
+      return await interaction.reply({
+        content: 'Open the JinHub pricing page to purchase access.',
+        components: [linkRow],
+        ephemeral: true
+      });
     }
     
-    if (interaction.customId === 'remove_free_key_modal') {
-      const modal = new ModalBuilder().setCustomId('remove_free_key_modal_form').setTitle('Remove Free Key');
-      const keyInput = new TextInputBuilder()
-        .setCustomId('remove_key_input')
-        .setLabel('LootLabs or Boostellar key')
-        .setStyle(TextInputStyle.Short)
-        .setPlaceholder('JinHub-...')
-        .setRequired(true)
-        .setMinLength(15)
-        .setMaxLength(45);
-      modal.addComponents(new ActionRowBuilder().addComponents(keyInput));
-      return await interaction.showModal(modal);
-    }
-    if (interaction.customId.startsWith('remove_free_cancel:')) {
-      const ownerId = interaction.customId.slice('remove_free_cancel:'.length);
-      if (ownerId !== user.id) return await interaction.reply({ content: 'This confirmation belongs to another user.', ephemeral: true });
-      return await interaction.update({ content: 'Key removal cancelled.', embeds: [], components: [] });
-    }
-    if (interaction.customId.startsWith('remove_free_confirm:')) {
-      const match = interaction.customId.match(/^remove_free_confirm:(\d+):(JinHub-.+)$/);
-      if (!match || match[1] !== user.id) return await interaction.reply({ content: 'This confirmation belongs to another user.', ephemeral: true });
-      const key = match[2];
-      await interaction.deferUpdate();
-      try {
-        const headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + CONFIG.kvEditorSecret };
-        const findResponse = await fetch(CONFIG.apiUrl + '/api/kv-editor', {
-          method: 'POST', headers,
-          body: JSON.stringify({ action: 'find-key', keyString: key, token: CONFIG.adminToken })
-        });
-        const found = await findResponse.json();
-        if (!found.success || !found.found || !['lootlabs', 'boostellar'].includes(found.provider)) {
-          return await interaction.editReply({ content: found.error || 'Key tidak ditemukan atau bukan key LootLabs/Boostellar.', embeds: [], components: [] });
-        }
-        const removeResponse = await fetch(CONFIG.apiUrl + '/api/kv-editor', {
-          method: 'POST', headers,
-          body: JSON.stringify({ action: 'remove-free-key', provider: found.provider, jhId: found.jhId, keyString: key, token: CONFIG.adminToken })
-        });
-        const result = await removeResponse.json();
-        if (!result.success) throw new Error(result.error || 'Server gagal menghapus key.');
-        const providerName = found.provider === 'boostellar' ? 'Boostellar' : 'LootLabs';
-        console.log('[Remove Key] Permanently removed', providerName, 'key for browser', found.jhId, 'by Discord user', user.id);
-        const embed = new EmbedBuilder()
-          .setColor(0x22c55e)
-          .setTitle('Free key removed')
-          .setDescription(key + ' dari ' + providerName + ' sudah dihapus dari record browser/server. Slot klaim tersedia lagi; refresh halaman key system agar daftar browser diperbarui.')
-          .setTimestamp();
-        return await interaction.editReply({ embeds: [embed], components: [] });
-      } catch (error) {
-        console.error('[Remove Key] Removal failed:', error);
-        const embed = new EmbedBuilder().setColor(0xef4444).setTitle('Key removal failed').setDescription(error.message || 'Coba lagi atau hubungi admin.');
-        return await interaction.editReply({ embeds: [embed], components: [] });
-      }
-    }
     // Reset HWID button - show modal
     if (interaction.customId === 'reset_hwid_modal') {
       const modal = new ModalBuilder()
@@ -747,46 +854,36 @@ client.on('interactionCreate', async interaction => {
         .setPlaceholder('XXXX-XXXX-XXXX-XXXX')
         .setRequired(true)
         .setMinLength(16)
-        .setMaxLength(45);
+        .setMaxLength(30);
 
       const firstRow = new ActionRowBuilder().addComponents(keyInput);
       modal.addComponents(firstRow);
 
       return await interaction.showModal(modal);
     }
+
+    if (interaction.customId === 'remove_key_modal') {
+      const modal = new ModalBuilder()
+        .setCustomId('remove_key_modal_form')
+        .setTitle('Remove Browser Key');
+
+      const keyInput = new TextInputBuilder()
+        .setCustomId('remove_key_input')
+        .setLabel('LootLabs / Boostellar free key:')
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder('JinHub-XXXXXX-XXXXXX-XXXXXX')
+        .setRequired(true)
+        .setMinLength(27)
+        .setMaxLength(27);
+
+      modal.addComponents(new ActionRowBuilder().addComponents(keyInput));
+      return await interaction.showModal(modal);
+    }
     
     // Check Cooldown button
     if (interaction.customId === 'check_cooldown_list') {
       const userCooldowns = getUserCooldownInfo(user.id);
-      
-      if (userCooldowns.length === 0) {
-        const embed = new EmbedBuilder()
-          .setColor(0x6b7280)
-          .setTitle('â° Your Cooldown Status')
-          .setDescription('You haven\'t reset any keys yet.\n\nUse the "âš™ï¸ Reset HWID" button to reset a key.')
-          .setFooter({ text: 'JinHub System â€¢ Cooldown: 2 days' })
-          .setTimestamp();
-        
-        return await interaction.reply({ embeds: [embed], ephemeral: true });
-      }
-      
-      const embed = new EmbedBuilder()
-        .setColor(0x3b82f6)
-        .setTitle('â° Your Cooldown Status')
-        .setDescription(`Total keys reset: **${userCooldowns.length}**`)
-        .setFooter({ text: 'JinHub System â€¢ Cooldown: 2 days' })
-        .setTimestamp();
-      
-      userCooldowns.forEach(cd => {
-        const status = cd.canReset ? 'âœ… Ready' : `â° <t:${Math.floor(cd.nextReset.getTime() / 1000)}:R>`;
-        embed.addFields({
-          name: `ðŸ”‘ ${cd.key}`,
-          value: `Last: <t:${Math.floor(cd.lastReset.getTime() / 1000)}:R>\n${status}`,
-          inline: true
-        });
-      });
-      
-      return await interaction.reply({ embeds: [embed], ephemeral: true });
+      return await interaction.reply(buildCooldownStatusCard(userCooldowns));
     }
     
     return;
@@ -798,45 +895,35 @@ client.on('interactionCreate', async interaction => {
   if (commandName === 'setup-panel') {
     await interaction.deferReply({ ephemeral: true });
 
-    const embed = createPanelEmbed();
-    const row = createPanelButtons();
+    const payload = buildPanelCard();
 
     try {
-      const message = await interaction.channel.send({ embeds: [embed], components: [row] });
+      const message = await interaction.channel.send(payload);
       
-      const successEmbed = new EmbedBuilder()
-        .setColor(0x22c55e)
-        .setTitle('âœ… Panel Setup Complete')
-        .setDescription(
-          'Permanent panel has been created in this channel.\n\n' +
-          '**Important:** Add these to your `.env` file:\n' +
-          '```env\n' +
-          `PANEL_CHANNEL_ID=${interaction.channel.id}\n` +
-          `PANEL_MESSAGE_ID=${message.id}\n` +
-          '```\n' +
-          'Then restart the bot to enable auto-update on restart.'
-        )
-        .setFooter({ text: 'JinHub System' })
-        .setTimestamp();
-      
-      await interaction.editReply({ embeds: [successEmbed] });
+      await interaction.editReply(buildCard([
+        '## ✅ Panel Setup Complete',
+        'Permanent panel has been created in this channel.\n\n' +
+        '**Important:** Add these to your `.env` file:\n' +
+        '```env\n' +
+        `PANEL_CHANNEL_ID=${interaction.channel.id}\n` +
+        `PANEL_MESSAGE_ID=${message.id}\n` +
+        '```\n' +
+        'Then restart the bot to enable auto-update on restart.',
+        '-# JinHub System',
+      ]));
       
       console.log('[Panel] Setup complete - Channel:', interaction.channel.id, 'Message:', message.id);
     } catch (error) {
-      const errorEmbed = new EmbedBuilder()
-        .setColor(0xef4444)
-        .setTitle('âŒ Setup Failed')
-        .setDescription('Failed to create panel. Make sure bot has permission to send messages.')
-        .addFields({ name: 'Error', value: error.message })
-        .setTimestamp();
-      
-      await interaction.editReply({ embeds: [errorEmbed] });
+      await interaction.editReply(buildCard([
+        '## ❌ Setup Failed',
+        'Failed to create panel. Make sure bot has permission to send messages.',
+        `**Error**\n${error.message}`,
+      ]));
     }
     
     return;
   }
 
-  // /check-cooldown command
   // /check-cooldown command
   else if (commandName === 'check-cooldown') {
     await interaction.deferReply({ ephemeral: true });
@@ -847,65 +934,36 @@ client.on('interactionCreate', async interaction => {
       const cleanKey = key.toUpperCase().trim();
       const cooldownCheck = isOnCooldown(user.id, cleanKey);
       
-      const embed = new EmbedBuilder()
-        .setColor(cooldownCheck.onCooldown ? 0xf59e0b : 0x22c55e)
-        .setTitle('â° Cooldown Status')
-        .addFields({
-          name: 'ðŸ”‘ Key',
-          value: `\`${cleanKey}\``,
-          inline: false
-        });
+      const lines = ['## ⏰ Cooldown Status', `**Key**\n\`${cleanKey}\``];
       
       if (cooldownCheck.onCooldown) {
-        embed.addFields(
-          {
-            name: 'â³ Time Remaining',
-            value: `${cooldownCheck.hoursRemaining}h ${cooldownCheck.minutesRemaining}m`,
-            inline: true
-          },
-          {
-            name: 'ðŸ“… Next Reset',
-            value: `<t:${Math.floor(cooldownCheck.nextResetDate.getTime() / 1000)}:R>`,
-            inline: true
-          }
-        );
-        embed.setDescription('âŒ This key is on cooldown');
+        lines.push('❌ This key is on cooldown');
+        lines.push(`**Time Remaining**\n${cooldownCheck.hoursRemaining}h ${cooldownCheck.minutesRemaining}m`);
+        lines.push(`**Next Reset**\n<t:${Math.floor(cooldownCheck.nextResetDate.getTime() / 1000)}:R>`);
       } else {
-        embed.setDescription('âœ… This key can be reset now!');
+        lines.push('✅ This key can be reset now!');
       }
       
-      embed.setTimestamp();
-      return await interaction.editReply({ embeds: [embed] });
+      return await interaction.editReply(buildCard(lines));
     } else {
       // Show all user's cooldowns
       const userCooldowns = getUserCooldownInfo(user.id);
       
       if (userCooldowns.length === 0) {
-        const embed = new EmbedBuilder()
-          .setColor(0x6b7280)
-          .setTitle('ðŸ“‹ Your Reset History')
-          .setDescription('You haven\'t reset any keys yet.')
-          .setTimestamp();
-        
-        return await interaction.editReply({ embeds: [embed] });
+        return await interaction.editReply(buildCard([
+          '## 📋 Your Reset History',
+          'You haven\'t reset any keys yet.',
+        ]));
       }
       
-      const embed = new EmbedBuilder()
-        .setColor(0x3b82f6)
-        .setTitle('ðŸ“‹ Your Reset History')
-        .setDescription(`Total keys reset: **${userCooldowns.length}**`)
-        .setTimestamp();
+      const lines = ['## 📋 Your Reset History', `Total keys reset: **${userCooldowns.length}**`];
       
       userCooldowns.forEach(cd => {
-        const status = cd.canReset ? 'âœ… Can reset' : `â° <t:${Math.floor(cd.nextReset.getTime() / 1000)}:R>`;
-        embed.addFields({
-          name: `ðŸ”‘ ${cd.key}`,
-          value: `Last reset: <t:${Math.floor(cd.lastReset.getTime() / 1000)}:R>\n${status}`,
-          inline: false
-        });
+        const status = cd.canReset ? 'Can reset' : `<t:${Math.floor(cd.nextReset.getTime() / 1000)}:R>`;
+        lines.push(`**${cd.key}**\nLast reset: <t:${Math.floor(cd.lastReset.getTime() / 1000)}:R>\n${status}`);
       });
       
-      return await interaction.editReply({ embeds: [embed] });
+      return await interaction.editReply(buildCard(lines));
     }
   }
 
@@ -916,42 +974,28 @@ client.on('interactionCreate', async interaction => {
     const userCooldowns = getUserCooldownInfo(user.id);
     
     if (userCooldowns.length === 0) {
-      const embed = new EmbedBuilder()
-        .setColor(0x6b7280)
-        .setTitle('ðŸ“‹ Your Reset History')
-        .setDescription('You haven\'t reset any keys yet.\n\nUse `/reset-hwid` to reset a key\'s HWID.')
-        .addFields({
-          name: 'â„¹ï¸ How it works',
-          value: `â€¢ Each key can be reset once every **${CONFIG.cooldownHours / 24} days**\nâ€¢ Cooldown applies to all tiers (Free & Premium)\nâ€¢ After reset, you can bind the key to a new device`
-        })
-        .setTimestamp();
-      
-      return await interaction.editReply({ embeds: [embed] });
+      return await interaction.editReply(buildCard([
+        '## 📋 Your Reset History',
+        'You haven\'t reset any keys yet.\n\nUse `/reset-hwid` to reset a key\'s HWID.',
+        `**How it works**\n• Each key can be reset once every **${CONFIG.cooldownHours / 24} days**\n• Cooldown applies to all tiers (Free & Premium)\n• After reset, you can bind the key to a new device`,
+      ]));
     }
 
-    const embed = new EmbedBuilder()
-      .setColor(0x7367f0)
-      .setTitle('ðŸ“‹ Your HWID Reset History')
-      .setDescription(`You have reset **${userCooldowns.length}** key(s)`)
-      .setTimestamp();
+    const lines = ['## 📋 Your HWID Reset History', `You have reset **${userCooldowns.length}** key(s)`];
     
     userCooldowns.forEach((cd, index) => {
       const status = cd.canReset 
-        ? 'âœ… **Ready to reset**' 
-        : `â° Next reset: <t:${Math.floor(cd.nextReset.getTime() / 1000)}:R>`;
+        ? '**Ready to reset**' 
+        : `Next reset: <t:${Math.floor(cd.nextReset.getTime() / 1000)}:R>`;
       
       const lastResetText = `<t:${Math.floor(cd.lastReset.getTime() / 1000)}:F>`;
       
-      embed.addFields({
-        name: `${index + 1}. ðŸ”‘ ${cd.key}`,
-        value: `Last reset: ${lastResetText}\n${status}`,
-        inline: false
-      });
+      lines.push(`**${index + 1}. ${cd.key}**\nLast reset: ${lastResetText}\n${status}`);
     });
     
-    embed.setFooter({ text: `Cooldown period: ${CONFIG.cooldownHours / 24} days` });
+    lines.push(`-# Cooldown period: ${CONFIG.cooldownHours / 24} days`);
     
-    return await interaction.editReply({ embeds: [embed] });
+    return await interaction.editReply(buildCard(lines));
   }
 });
 
